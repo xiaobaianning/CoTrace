@@ -227,9 +227,8 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     // Hook mmap/mprotect 检测 JIT 代码区域
     // ============================================================
 
-    LOGE("[Step 8] skipping interceptor hooks (disabled for debugging)");
-    // TODO: interceptor hooks disabled - crashing on gum_interceptor_obtain()
-    // Will re-enable after basic Stalker is working
+    LOGE("[Step 8] interceptor hooks deferred to run()");
+    // Hooks are set up in run() after Stalker is fully initialized
 
     size_t path_len = strlen(trace_file_path);
     if (path_len >= sizeof(instance->trace_file_path)) {
@@ -320,9 +319,67 @@ void* thread_function(void* arg) {
 }
 
 
+// JIT hook 设置函数（延迟到 run() 中调用）
+static void setup_jit_hooks() {
+    LOGE("[JIT Hooks] setting up mmap/mprotect/dlopen hooks...");
+
+    // mmap hook
+    auto mmap_addr = gum_module_find_export_by_name(NULL, "mmap");
+    LOGE("[JIT Hooks] mmap: 0x%lx", (uintptr_t)mmap_addr);
+    if (mmap_addr != 0) {
+        static auto original_mmap = (gpointer(*)(uintptr_t, size_t, int, int, int, off_t))mmap_addr;
+        GumInterceptor *interceptor = gum_interceptor_obtain();
+        gum_interceptor_begin_transaction(interceptor);
+        gum_interceptor_replace_fast(interceptor, GSIZE_TO_POINTER(mmap_addr),
+            (gpointer) +[](uintptr_t addr, size_t length, int prot, int flags, int fd, off_t offset) -> gpointer {
+                gpointer result = original_mmap(addr, length, prot, flags, fd, offset);
+                if (result != MAP_FAILED && (prot & PROT_EXEC)) {
+                    auto *rm = CodeRegionManager::get_instance();
+                    char name[64];
+                    snprintf(name, sizeof(name), "jit_mmap_0x%llx", (unsigned long long)(uintptr_t)result);
+                    rm->add_region((uintptr_t)result, (uintptr_t)result + length, RegionType::JIT, name);
+                    LOGE("[JIT] mmap: %s [0x%llx - 0x%llx]", name,
+                         (unsigned long long)(uintptr_t)result, (unsigned long long)(uintptr_t)result + length);
+                }
+                return result;
+            }, nullptr);
+        gum_interceptor_end_transaction(interceptor);
+        LOGE("[JIT Hooks] mmap hook installed");
+    }
+
+    // mprotect hook
+    auto mprotect_addr = gum_module_find_export_by_name(NULL, "mprotect");
+    LOGE("[JIT Hooks] mprotect: 0x%lx", (uintptr_t)mprotect_addr);
+    if (mprotect_addr != 0) {
+        static auto original_mprotect = (int(*)(gpointer, size_t, int))mprotect_addr;
+        GumInterceptor *interceptor = gum_interceptor_obtain();
+        gum_interceptor_begin_transaction(interceptor);
+        gum_interceptor_replace_fast(interceptor, GSIZE_TO_POINTER(mprotect_addr),
+            (gpointer) +[](gpointer addr, size_t length, int prot) -> int {
+                int result = original_mprotect(addr, length, prot);
+                if (result == 0 && (prot & PROT_EXEC)) {
+                    auto *rm = CodeRegionManager::get_instance();
+                    char name[64];
+                    snprintf(name, sizeof(name), "jit_mprot_0x%llx", (unsigned long long)(uintptr_t)addr);
+                    rm->add_region((uintptr_t)addr, (uintptr_t)addr + length, RegionType::JIT, name);
+                    LOGE("[JIT] mprotect: %s [0x%llx - 0x%llx]", name,
+                         (unsigned long long)(uintptr_t)addr, (unsigned long long)(uintptr_t)addr + length);
+                }
+                return result;
+            }, nullptr);
+        gum_interceptor_end_transaction(interceptor);
+        LOGE("[JIT Hooks] mprotect hook installed");
+    }
+
+    LOGE("[JIT Hooks] done");
+}
+
 extern "C" __attribute__((visibility("default")))
 void run() {
     LOGE("=== CoTrace run() called ===");
+
+    // 设置 JIT hooks（在 Stalker 初始化之后）
+    setup_jit_hooks();
 
     pthread_t thread1;
     pthread_create(&thread1, NULL, thread_function, nullptr);
