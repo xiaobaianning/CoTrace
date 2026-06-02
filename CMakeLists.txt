@@ -4,8 +4,13 @@ project(GumTrace CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Frida 版本选择: 16 或 17 (默认 17)
+option(FRIDA_VERSION "Frida Gum major version (16 or 17)" 17)
+message(STATUS "Frida version: ${FRIDA_VERSION}")
+
 include_directories(${CMAKE_SOURCE_DIR}/libs)
 include_directories(${CMAKE_SOURCE_DIR})
+include_directories(${CMAKE_SOURCE_DIR}/src)
 
 set(GUMTRACE_SOURCES
         src/main.cpp
@@ -19,6 +24,9 @@ add_library(GumTrace SHARED
         ${GUMTRACE_SOURCES}
 )
 
+# 传递 Frida 版本宏到源码
+target_compile_definitions(GumTrace PRIVATE FRIDA_VERSION=${FRIDA_VERSION})
+
 if(ANDROID)
     message(STATUS "Configuring for Android")
 
@@ -27,7 +35,11 @@ if(ANDROID)
     target_include_directories(GumTrace SYSTEM PUBLIC .
             ${ANDROID_SYSROOT_INCLUDE})
 
-    target_link_libraries(GumTrace PRIVATE ${CMAKE_SOURCE_DIR}/libs/FridaGum-Android-17.8.3-fix.a)
+    if(FRIDA_VERSION GREATER_EQUAL 17)
+        target_link_libraries(GumTrace PRIVATE ${CMAKE_SOURCE_DIR}/libs/FridaGum-Android-17.8.3-fix.a)
+    else()
+        target_link_libraries(GumTrace PRIVATE ${CMAKE_SOURCE_DIR}/libs/FridaGum-Android-16-fix.a)
+    endif()
     target_link_libraries(GumTrace PRIVATE log dl m z)
 
 else()
@@ -85,9 +97,17 @@ else()
             -miphoneos-version-min=12.0
     )
 
-    target_link_libraries(GumTrace
-            ${CMAKE_SOURCE_DIR}/libs/FridaGum-IOS-17.8.3-fix.a
-            "-framework Foundation"
-            "-framework CoreFoundation"
-    )
+    if(FRIDA_VERSION GREATER_EQUAL 17)
+        target_link_libraries(GumTrace
+                ${CMAKE_SOURCE_DIR}/libs/FridaGum-IOS-17.8.3-fix.a
+                "-framework Foundation"
+                "-framework CoreFoundation"
+        )
+    else()
+        target_link_libraries(GumTrace
+                ${CMAKE_SOURCE_DIR}/libs/FridaGum-IOS-16-fix.a
+                "-framework Foundation"
+                "-framework CoreFoundation"
+        )
+    endif()
 endif()
