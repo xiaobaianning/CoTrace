@@ -19,40 +19,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-android:
-    name: Build Android
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r29
-
-      - name: Build Android library
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          set -euo pipefail
-          rm -rf build_android
-          ./build_android.sh
-
-      - name: Package Android library
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          install -m 0644 build_android/libGumTrace.so dist/CoTrace-android-arm64-v8a.so
-
-      - name: Upload Android artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: cotrace-android-arm64-v8a
-          path: dist/CoTrace-android-arm64-v8a.so
-          if-no-files-found: error
-
   build-ios:
     name: Build iOS
     runs-on: macOS-15
@@ -94,19 +60,12 @@ jobs:
     name: Publish Latest Release
     runs-on: ubuntu-24.04
     needs:
-      - build-android
       - build-ios
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Download Android artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: cotrace-android-arm64-v8a
-          path: dist
 
       - name: Download iOS artifact
         uses: actions/download-artifact@v8
@@ -126,7 +85,7 @@ jobs:
           git push origin refs/tags/latest --force
 
           cat > release-notes.md <<'EOF'
-          Automated binary build for CoTrace.
+          Automated iOS binary build for CoTrace.
 
           Features:
           - JIT code tracing (auto-detect mmap/mprotect PROT_EXEC)
@@ -135,7 +94,6 @@ jobs:
           - RCU lock-free region lookup
 
           Assets:
-          - CoTrace-android-arm64-v8a.so
           - CoTrace-ios-arm64.dylib
           EOF
 
@@ -153,6 +111,5 @@ jobs:
           fi
 
           gh release upload latest \
-            dist/CoTrace-android-arm64-v8a.so \
             dist/CoTrace-ios-arm64.dylib \
             --clobber
