@@ -251,12 +251,25 @@ function main() {
         console.log('[CoTrace] add_jit_region not available:', e.message)
     }
 
-    // 启动追踪 - 追踪 App 主线程
-    let threads = Process.enumerateThreads()
-    console.log('[CoTrace] available threads:', threads.map(t => t.id).join(', '))
-    let mainThreadId = threads[0].id
-    console.log('[CoTrace] using thread:', mainThreadId)
-    startTrace(targetSo, mainThreadId, 0)
+    // 启动追踪 - 用 hook 方式在 App 主线程上下文中启动
+    let targetModule = Process.findModuleByName(targetSo)
+    if (targetModule) {
+        console.log('[CoTrace] hooking', targetSo, 'entry at:', targetModule.base)
+        let hooked = false
+        Interceptor.attach(targetModule.base.add(0x100), {
+            onEnter() {
+                if (!hooked) {
+                    hooked = true
+                    console.log('[CoTrace] entered', targetSo, '- starting trace on this thread')
+                    // thread_id=0 表示追踪当前线程（App 主线程）
+                    startTrace(targetSo, 0, 0)
+                }
+            }
+        })
+        console.log('[CoTrace] waiting for', targetSo, 'to be executed...')
+    } else {
+        console.log('[CoTrace] ERROR: module', targetSo, 'not found')
+    }
 
     // --- 示例 2: hook 目标函数，在其执行期间追踪 ---
     // let targetModule = Process.findModuleByName(targetSo)
