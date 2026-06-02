@@ -141,10 +141,15 @@ function startTrace(moduleName, threadId, mode) {
     console.log('[CoTrace]   thread:', threadId === 0 ? 'current' : threadId)
     console.log('[CoTrace]   mode:', mode === 0 ? 'Stand' : mode === 1 ? 'DEBUG' : 'Stable')
 
-    gumtrace_init(moduleNames, outputPath, threadId, options)
-    gumtrace_run()
-
-    console.log('[CoTrace] trace started')
+    try {
+        gumtrace_init(moduleNames, outputPath, threadId, options)
+        console.log('[CoTrace] init() done, calling run()...')
+        gumtrace_run()
+        console.log('[CoTrace] trace started')
+    } catch(e) {
+        console.log('[CoTrace] ERROR:', e.message)
+        _traceStarted = false
+    }
 }
 
 function stopTrace() {
