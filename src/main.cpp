@@ -161,17 +161,26 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     GumTrace *instance = GumTrace::get_instance();
     memcpy(&instance->options, options, sizeof(GUM_OPTIONS));
 
-    // 检查 RWX 支持
+    // 检查 RWX 支持（仅日志，不阻断）
     GumRwxSupport rwx_support = gum_query_rwx_support();
     LOGE("RWX support: %s",
          rwx_support == GUM_RWX_FULL ? "FULL" :
          rwx_support == GUM_RWX_ALLOCATIONS_ONLY ? "ALLOCATIONS_ONLY" : "NONE");
     if (rwx_support == GUM_RWX_NONE) {
-        LOGE("WARNING: RWX not supported. Stalker may not work correctly.");
+        LOGE("RWX detection says NONE, but continuing anyway (jailbreak may still support it)");
     }
 
+    LOGE("[Stalker] creating stalker...");
     instance->_stalker = gum_stalker_new();
+    if (!instance->_stalker) {
+        LOGE("[Stalker] ERROR: gum_stalker_new() returned null!");
+        return;
+    }
+    LOGE("[Stalker] stalker created: %p", instance->_stalker);
+
+    LOGE("[Stalker] setting trust threshold...");
     gum_stalker_set_trust_threshold(instance->_stalker, 0);
+    LOGE("[Stalker] trust threshold set");
     // 注意: gum_stalker_set_ratio() 仅 Frida 17+ 可用，Frida 16 中不存在
     if (instance->options.mode == GUM_OPTIONS_MODE_STABLE) {
         gum_process_enumerate_ranges(GUM_PAGE_RW, on_range_found, nullptr);
@@ -197,14 +206,19 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
         module_map["size"] = gum_module_range->size;
     }
 
+    LOGE("[Init] enumerating modules...");
     gum_process_enumerate_modules(module_enumerate, nullptr);
+    LOGE("[Init] module enumeration done, %zu modules tracked", instance->modules.size());
 
     // ============================================================
     // Hook mmap/mprotect 检测 JIT 代码区域
     // ============================================================
 
+    LOGE("[Init] setting up mmap/mprotect/dlopen hooks...");
+
     // mmap hook: 检测带 PROT_EXEC 的内存分配
     auto mmap_addr = gum_module_find_export_by_name(NULL, "mmap");
+    LOGE("[Init] mmap addr: 0x%lx", (uintptr_t)mmap_addr);
     if (mmap_addr != 0) {
         // 保存原始函数指针
         static auto original_mmap = (gpointer(*)(uintptr_t, size_t, int, int, int, off_t))mmap_addr;
@@ -348,6 +362,7 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     }
 #    endif
 
+    LOGE("=== CoTrace init() complete ===");
 }
 
 void* thread_function(void* arg) {
