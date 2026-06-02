@@ -38,13 +38,30 @@ function getSandboxPath(filename) {
 }
 
 function findDylib() {
-    let dlopen = new NativeFunction(Module.findExportByName(null, 'dlopen'), 'pointer', ['pointer', 'int'])
+    // 多种方式查找 dlopen
+    let dlopenAddr = Module.findExportByName(null, 'dlopen')
+    if (!dlopenAddr) {
+        // 从 libdyld 查找
+        let libdyld = Process.findModuleByName('libdyld.dylib')
+        if (libdyld) dlopenAddr = Module.findExportByName('libdyld.dylib', 'dlopen')
+    }
+    if (!dlopenAddr) {
+        // 从 libSystem 查找
+        dlopenAddr = Module.findExportByName('libSystem.B.dylib', 'dlopen')
+    }
+    if (!dlopenAddr) {
+        console.log('[CoTrace] ERROR: cannot find dlopen')
+        return null
+    }
+    console.log('[CoTrace] dlopen at:', dlopenAddr)
+    let dlopen = new NativeFunction(dlopenAddr, 'pointer', ['pointer', 'int'])
 
     for (let path of dylibSearchPaths) {
         let fullPath = path + traceSoName
+        console.log('[CoTrace] trying:', fullPath)
         let handle = dlopen(Memory.allocUtf8String(fullPath), 1)  // RTLD_LAZY = 1
         if (handle && !handle.isNull()) {
-            console.log('[CoTrace] found dylib at:', fullPath)
+            console.log('[CoTrace] found dylib at:', fullPath, handle)
             return handle
         }
     }
@@ -62,7 +79,19 @@ function loadGumTrace() {
         return false
     }
 
-    let dlsym = new NativeFunction(Module.findExportByName(null, 'dlsym'), 'pointer', ['pointer', 'pointer'])
+    let dlsymAddr = Module.findExportByName(null, 'dlsym')
+    if (!dlsymAddr) {
+        let libdyld = Process.findModuleByName('libdyld.dylib')
+        if (libdyld) dlsymAddr = Module.findExportByName('libdyld.dylib', 'dlsym')
+    }
+    if (!dlsymAddr) {
+        dlsymAddr = Module.findExportByName('libSystem.B.dylib', 'dlsym')
+    }
+    if (!dlsymAddr) {
+        console.log('[CoTrace] ERROR: cannot find dlsym')
+        return false
+    }
+    let dlsym = new NativeFunction(dlsymAddr, 'pointer', ['pointer', 'pointer'])
     let initAddr = dlsym(soHandle, Memory.allocUtf8String('init'))
     let runAddr = dlsym(soHandle, Memory.allocUtf8String('run'))
     let unrunAddr = dlsym(soHandle, Memory.allocUtf8String('unrun'))
