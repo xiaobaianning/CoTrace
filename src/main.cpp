@@ -200,100 +200,88 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     // mmap hook: 检测带 PROT_EXEC 的内存分配
     auto mmap_addr = gum_module_find_export_by_name(NULL, "mmap");
     if (mmap_addr != 0) {
-        static GumInterceptor *mmap_interceptor = gum_interceptor_new();
+        // 保存原始函数指针
+        static auto original_mmap = (gpointer(*)(uintptr_t, size_t, int, int, int, off_t))mmap_addr;
+
+        GumInterceptor *mmap_interceptor = gum_interceptor_obtain();
         gum_interceptor_begin_transaction(mmap_interceptor);
-
-        struct MmapContext { uintptr_t requested_addr; size_t size; int prot; };
-
         gum_interceptor_replace_fast(mmap_interceptor, GSIZE_TO_POINTER(mmap_addr),
             (gpointer) +[](uintptr_t addr, size_t length, int prot, int flags, int fd, off_t offset) -> gpointer {
-                // 调用原始 mmap
-                typedef gpointer (*mmap_fn)(uintptr_t, size_t, int, int, int, off_t);
-                auto original = (mmap_fn)gum_invocation_context_get_replacement_function(
-                    gum_interceptor_get_current_invocation());
-                gpointer result = original(addr, length, prot, flags, fd, offset);
+                gpointer result = original_mmap(addr, length, prot, flags, fd, offset);
 
-                // 检查是否有执行权限
                 if (result != MAP_FAILED && (prot & PROT_EXEC)) {
                     auto *rm = CodeRegionManager::get_instance();
                     char name[64];
-                    snprintf(name, sizeof(name), "jit_mmap_0x%lx", (uintptr_t)result);
+                    snprintf(name, sizeof(name), "jit_mmap_0x%llx", (unsigned long long)(uintptr_t)result);
                     rm->add_region((uintptr_t)result, (uintptr_t)result + length,
                                    RegionType::JIT, name);
-                    LOGE("[JIT] mmap detected: %s [0x%lx - 0x%lx] (%zu bytes)",
-                         name, (uintptr_t)result, (uintptr_t)result + length, length);
+                    LOGE("[JIT] mmap detected: %s [0x%llx - 0x%llx] (%zu bytes)",
+                         name, (unsigned long long)(uintptr_t)result,
+                         (unsigned long long)(uintptr_t)result + length, length);
                 }
                 return result;
             }, nullptr);
-
         gum_interceptor_end_transaction(mmap_interceptor);
     }
 
     // mprotect hook: 检测权限变更为 PROT_EXEC
     auto mprotect_addr = gum_module_find_export_by_name(NULL, "mprotect");
     if (mprotect_addr != 0) {
-        static GumInterceptor *mprotect_interceptor = gum_interceptor_new();
-        gum_interceptor_begin_transaction(mprotect_interceptor);
+        static auto original_mprotect = (int(*)(gpointer, size_t, int))mprotect_addr;
 
+        GumInterceptor *mprotect_interceptor = gum_interceptor_obtain();
+        gum_interceptor_begin_transaction(mprotect_interceptor);
         gum_interceptor_replace_fast(mprotect_interceptor, GSIZE_TO_POINTER(mprotect_addr),
             (gpointer) +[](gpointer addr, size_t length, int prot) -> int {
-                typedef int (*mprotect_fn)(gpointer, size_t, int);
-                auto original = (mprotect_fn)gum_invocation_context_get_replacement_function(
-                    gum_interceptor_get_current_invocation());
-                int result = original(addr, length, prot);
+                int result = original_mprotect(addr, length, prot);
 
-                // 检查是否新增了执行权限
                 if (result == 0 && (prot & PROT_EXEC)) {
                     auto *rm = CodeRegionManager::get_instance();
                     char name[64];
-                    snprintf(name, sizeof(name), "jit_mprot_0x%lx", (uintptr_t)addr);
+                    snprintf(name, sizeof(name), "jit_mprot_0x%llx", (unsigned long long)(uintptr_t)addr);
                     rm->add_region((uintptr_t)addr, (uintptr_t)addr + length,
                                    RegionType::JIT, name);
-                    LOGE("[JIT] mprotect detected: %s [0x%lx - 0x%lx] (%zu bytes)",
-                         name, (uintptr_t)addr, (uintptr_t)addr + length, length);
+                    LOGE("[JIT] mprotect detected: %s [0x%llx - 0x%llx] (%zu bytes)",
+                         name, (unsigned long long)(uintptr_t)addr,
+                         (unsigned long long)(uintptr_t)addr + length, length);
                 }
                 return result;
             }, nullptr);
-
         gum_interceptor_end_transaction(mprotect_interceptor);
     }
 
     // dlopen hook: 检测新加载的模块
-    // 注意: Frida 16 没有 gum_process_find_module_by_name()
-    // 使用 gum_module_find_export_by_name(NULL, "dlopen") 代替
     auto dlopen_addr = gum_module_find_export_by_name(NULL, "dlopen");
     if (dlopen_addr != 0) {
-        static GumInterceptor *dlopen_interceptor = gum_interceptor_new();
+        static auto original_dlopen = (gpointer(*)(const char*, int))dlopen_addr;
+
+        GumInterceptor *dlopen_interceptor = gum_interceptor_obtain();
         gum_interceptor_begin_transaction(dlopen_interceptor);
-
-        // 保存原始 dlopen 指针供回调使用
-        static gpointer original_dlopen = GSIZE_TO_POINTER(dlopen_addr);
-
         gum_interceptor_replace_fast(dlopen_interceptor, GSIZE_TO_POINTER(dlopen_addr),
             (gpointer) +[](const char *path, int flags) -> gpointer {
-                typedef gpointer (*dlopen_fn)(const char*, int);
-                auto original = (dlopen_fn)original_dlopen;
-                gpointer result = original(path, flags);
+                gpointer result = original_dlopen(path, flags);
 
-                // 新模块加载后，枚举所有模块找到新加载的，加入追踪范围
                 if (result != nullptr && path != nullptr) {
-                    // 提取模块名
                     const char *mod_name = strrchr(path, '/');
                     if (mod_name) mod_name++; else mod_name = path;
 
-                    // 使用 gum_process_enumerate_modules 查找新模块
+                    // 查找新加载的模块并加入追踪范围
                     struct FindCtx { const char *target; GumMemoryRange range; bool found; };
                     FindCtx ctx = {mod_name, {0, 0}, false};
 
                     gum_process_enumerate_modules(
-                        +[](const GumModuleDetails *details, gpointer user_data) -> gboolean {
+                        +[](GumModule *module, gpointer user_data) -> gboolean {
                             auto *fc = (FindCtx*)user_data;
-                            if (details->name && strcmp(details->name, fc->target) == 0) {
-                                fc->range = *details->range;
-                                fc->found = true;
-                                return FALSE;  // 找到，停止枚举
+                            const char *name = gum_module_get_name(module);
+                            if (name && strcmp(name, fc->target) == 0) {
+                                auto *range = gum_module_get_range(module);
+                                if (range) {
+                                    fc->range = *range;
+                                    fc->found = true;
+                                }
+                                return FALSE;
                             }
-                            return TRUE;  // 继续
+                            return TRUE;
                         }, &ctx);
 
                     if (ctx.found) {
@@ -301,13 +289,14 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
                         rm->add_region(ctx.range.base_address,
                                       ctx.range.base_address + ctx.range.size,
                                       RegionType::MODULE, mod_name);
-                        LOGE("[MODULE] dlopen detected: %s [0x%lx - 0x%lx]",
-                             mod_name, ctx.range.base_address, ctx.range.base_address + ctx.range.size);
+                        LOGE("[MODULE] dlopen detected: %s [0x%llx - 0x%llx]",
+                             mod_name,
+                             (unsigned long long)ctx.range.base_address,
+                             (unsigned long long)(ctx.range.base_address + ctx.range.size));
                     }
                 }
                 return result;
             }, nullptr);
-
         gum_interceptor_end_transaction(dlopen_interceptor);
     }
 
