@@ -1,116 +1,165 @@
-let traceSoName = 'libGumTrace.dylib'
-let targetSo = 'libtarget.dylib'
+// ============================================================
+// CoTrace iOS 使用示例
+// ============================================================
+// 使用前请修改以下配置:
+//   1. traceSoName: dylib 文件名
+//   2. dylibSearchPaths: dylib 搜索路径（根据越狱类型）
+//   3. targetSo: 要追踪的目标模块名
+// ============================================================
 
+// --- 配置区 ---
+let traceSoName = 'libGumTrace.dylib'
+let targetSo = 'libtarget.dylib'  // 改成你要追踪的模块名
+
+// dylib 搜索路径（按优先级）
+let dylibSearchPaths = [
+    '/var/jb/var/root/',           // rootless (Dopamine)
+    '/var/jb/usr/lib/',            // rootless 备选
+    '/usr/lib/',                   // rootful (palera1n)
+    '/var/tmp/',                   // 通用备选
+    '/tmp/',                       // 最后备选
+]
+
+// --- 全局变量 ---
 let gumtrace_init = null
 let gumtrace_run = null
 let gumtrace_unrun = null
 
-function loadGumTrace() {
-    let dlopen = new NativeFunction(Module.findGlobalExportByName('dlopen'), 'pointer', ['pointer', 'int'])
-    let dlsym = new NativeFunction(Module.findGlobalExportByName('dlsym'), 'pointer', ['pointer', 'pointer'])
-
-    let soHandle = dlopen(Memory.allocUtf8String('/var/jb/var/root/' + traceSoName), 2)
-    console.log('GumTrace loaded:', soHandle)
-
-    gumtrace_init = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('init')), 'void', ['pointer', 'pointer', 'int', 'pointer'])
-    gumtrace_run = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('run')), 'void', [])
-    gumtrace_unrun = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('unrun')), 'void', [])
-}
-
+// --- 工具函数 ---
 
 function getSandboxPath(filename) {
     try {
         const homePath = ObjC.classes.NSString.stringWithString_("~").stringByExpandingTildeInPath().toString();
-        console.log('trace file:', homePath + '/Documents/' + filename);
-        return homePath + '/Documents/' + filename;
+        return homePath + '/Documents/' + filename
     } catch (e) {
-        console.log('获取沙盒路径失败:', e);
+        console.log('[CoTrace] 获取沙盒路径失败:', e)
         return '/tmp/' + filename
     }
 }
 
-// ============================================================
-// 模式 1: 追踪指定模块（标准用法）
-// ============================================================
-function startTrace() {
-    loadGumTrace()
+function findDylib() {
+    let dlopen = new NativeFunction(Module.findGlobalExportByName('dlopen'), 'pointer', ['pointer', 'int'])
 
-    let moduleNames = Memory.allocUtf8String(targetSo)
+    for (let path of dylibSearchPaths) {
+        let fullPath = path + traceSoName
+        let handle = dlopen(Memory.allocUtf8String(fullPath), 1)  // RTLD_LAZY = 1
+        if (handle && !handle.isNull()) {
+            console.log('[CoTrace] found dylib at:', fullPath)
+            return handle
+        }
+    }
+    console.log('[CoTrace] ERROR: dylib not found in any search path')
+    console.log('[CoTrace] searched:', dylibSearchPaths.join(', '))
+    return null
+}
+
+// --- 核心函数 ---
+
+function loadGumTrace() {
+    let soHandle = findDylib()
+    if (!soHandle) {
+        console.log('[CoTrace] ERROR: failed to load dylib')
+        return false
+    }
+
+    let dlsym = new NativeFunction(Module.findGlobalExportByName('dlsym'), 'pointer', ['pointer', 'pointer'])
+    let initAddr = dlsym(soHandle, Memory.allocUtf8String('init'))
+    let runAddr = dlsym(soHandle, Memory.allocUtf8String('run'))
+    let unrunAddr = dlsym(soHandle, Memory.allocUtf8String('unrun'))
+
+    if (initAddr.isNull() || runAddr.isNull() || unrunAddr.isNull()) {
+        console.log('[CoTrace] ERROR: failed to resolve symbols')
+        console.log('[CoTrace]   init:', initAddr)
+        console.log('[CoTrace]   run:', runAddr)
+        console.log('[CoTrace]   unrun:', unrunAddr)
+        return false
+    }
+
+    gumtrace_init = new NativeFunction(initAddr, 'void', ['pointer', 'pointer', 'int', 'pointer'])
+    gumtrace_run = new NativeFunction(runAddr, 'void', [])
+    gumtrace_unrun = new NativeFunction(unrunAddr, 'void', [])
+
+    console.log('[CoTrace] dylib loaded successfully')
+    return true
+}
+
+function startTrace(moduleName, threadId, mode) {
+    moduleName = moduleName || targetSo
+    threadId = threadId || 0
+    mode = mode || 0
+
+    if (!loadGumTrace()) return
+
+    let moduleNames = Memory.allocUtf8String(moduleName)
     let outputPath = Memory.allocUtf8String(getSandboxPath('trace.log'))
-    let threadId = 0   // 0 = 当前线程
     let options = Memory.alloc(8)
+    options.writeU64(mode)
 
-    // 0 = Stand 模式
-    // 1 = DEBUG 模式（高频刷写，实时查看）
-    // 2 = Stable 模式（更安全，但较慢）
-    options.writeU64(0)
-
-    console.log('start trace')
+    console.log('[CoTrace] starting trace:')
+    console.log('[CoTrace]   module:', moduleName)
+    console.log('[CoTrace]   output:', outputPath)
+    console.log('[CoTrace]   thread:', threadId === 0 ? 'current' : threadId)
+    console.log('[CoTrace]   mode:', mode === 0 ? 'Stand' : mode === 1 ? 'DEBUG' : 'Stable')
 
     gumtrace_init(moduleNames, outputPath, threadId, options)
     gumtrace_run()
+
+    console.log('[CoTrace] trace started')
 }
 
 function stopTrace() {
-    console.log('stop trace')
-    gumtrace_unrun()
+    if (gumtrace_unrun) {
+        console.log('[CoTrace] stopping trace...')
+        gumtrace_unrun()
+        console.log('[CoTrace] trace stopped')
+    }
 }
-
-// ============================================================
-// 模式 2: 追踪 JIT 代码（自动检测 mmap/mprotect）
-// ============================================================
-// CoTrace 会自动 hook mmap/mprotect，当检测到 PROT_EXEC 的
-// 内存分配时，自动将其加入追踪范围。
-//
-// 使用方法：只需指定一个初始模块，JIT 区域会在运行时自动捕获。
-// 例如追踪使用 JavaScriptCore 的应用：
-//
-//   let moduleNames = Memory.allocUtf8String('JavaScriptCore')
-//
-// 或追踪使用自定义 VM 的应用：
-//
-//   let moduleNames = Memory.allocUtf8String('libvm.dylib')
-//
-// JIT 生成的代码会自动被追踪，无需手动指定地址。
 
 // ============================================================
 // 使用示例
 // ============================================================
 
-let isTrace = false
-function hook() {
+function main() {
+    console.log('[CoTrace] iOS example loaded')
+    console.log('[CoTrace] target module:', targetSo)
 
-    // 示例 1: hook 目标函数，在其执行期间进行追踪
-    let targetModule = Process.findModuleByName(targetSo)
-    if (targetModule) {
-        Interceptor.attach(targetModule.base.add(0x1234), {
-            onEnter() {
-                if (isTrace === false) {
-                    isTrace = true
-                    startTrace()
-                    this.tracing = true
-                }
-            },
-            onLeave() {
-                if (this.tracing) {
-                    stopTrace()
-                }
-            }
-        })
-    }
+    // --- 示例 1: 直接启动追踪（最简单） ---
+    startTrace()
 
-    // 示例 2: 直接启动全量追踪（包含 JIT 代码）
-    // startTrace()
+    // --- 示例 2: hook 目标函数，在其执行期间追踪 ---
+    // let targetModule = Process.findModuleByName(targetSo)
+    // if (targetModule) {
+    //     Interceptor.attach(targetModule.base.add(0x1234), {
+    //         onEnter() {
+    //             startTrace()
+    //             this.tracing = true
+    //         },
+    //         onLeave() {
+    //             if (this.tracing) stopTrace()
+    //         }
+    //     })
+    // }
 
-    // 示例 3: 追踪特定线程
-    // loadGumTrace()
-    // let moduleNames = Memory.allocUtf8String(targetSo)
-    // let outputPath = Memory.allocUtf8String(getSandboxPath('trace.log'))
-    // let threadId = Process.enumerateThreads()[0].id  // 指定线程 ID
-    // let options = Memory.alloc(8)
-    // options.writeU64(1)  // DEBUG 模式
-    // gumtrace_init(moduleNames, outputPath, threadId, options)
-    // gumtrace_run()
+    // --- 示例 3: 追踪 JIT 代码（指定 JavaScriptCore） ---
+    // startTrace('JavaScriptCore')
+
+    // --- 示例 4: 追踪特定线程，DEBUG 模式 ---
+    // let threads = Process.enumerateThreads()
+    // console.log('[CoTrace] threads:', threads.map(t => t.id).join(', '))
+    // startTrace(targetSo, threads[0].id, 1)
+
+    // --- 示例 5: 等待模块加载后追踪 ---
+    // Interceptor.attach(Module.findExportByName(null, 'dlopen'), {
+    //     onEnter(args) {
+    //         this.path = args[0].readUtf8String()
+    //     },
+    //     onLeave(retval) {
+    //         if (this.path && this.path.includes(targetSo)) {
+    //             console.log('[CoTrace] target module loaded:', this.path)
+    //             startTrace()
+    //         }
+    //     }
+    // })
 }
 
-setImmediate(hook)
+setImmediate(main)
