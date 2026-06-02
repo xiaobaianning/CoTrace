@@ -378,8 +378,8 @@ extern "C" __attribute__((visibility("default")))
 void run() {
     LOGE("=== CoTrace run() called ===");
 
-    // 设置 JIT hooks（在 Stalker 初始化之后）
-    setup_jit_hooks();
+    // JIT hooks 暂时禁用（interceptor 在此设备上崩溃）
+    // setup_jit_hooks();
 
     pthread_t thread1;
     pthread_create(&thread1, NULL, thread_function, nullptr);
