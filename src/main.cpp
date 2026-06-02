@@ -144,9 +144,13 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     LOGE("  module_names: %s", module_names ? module_names : "(null)");
     LOGE("  trace_file_path: %s", trace_file_path ? trace_file_path : "(null)");
     LOGE("  thread_id: %d", thread_id);
-    LOGE("  options mode: %llu", options ? options->mode : 0);
+    LOGE("  options: %p", options);
 
+    LOGE("[Step 1] gum_init()...");
     gum_init();
+    LOGE("[Step 1] gum_init() done");
+
+    LOGE("[Step 2] gum_process_get_code_signing_policy()...");
     auto code_signing_policy = gum_process_get_code_signing_policy();
     LOGE("Gum code signing policy before init: %s",
          gum_code_signing_policy_to_string(code_signing_policy));
@@ -158,8 +162,17 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     }
 #endif
 
+    LOGE("[Step 3] GumTrace::get_instance()...");
     GumTrace *instance = GumTrace::get_instance();
-    memcpy(&instance->options, options, sizeof(GUM_OPTIONS));
+    LOGE("[Step 3] instance: %p", instance);
+
+    LOGE("[Step 4] memcpy options...");
+    if (options) {
+        memcpy(&instance->options, options, sizeof(GUM_OPTIONS));
+    } else {
+        instance->options.mode = 0;
+    }
+    LOGE("[Step 4] options mode: %llu", instance->options.mode);
 
     // 检查 RWX 支持（仅日志，不阻断）
     GumRwxSupport rwx_support = gum_query_rwx_support();
@@ -170,18 +183,18 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
         LOGE("RWX detection says NONE, but continuing anyway (jailbreak may still support it)");
     }
 
-    LOGE("[Stalker] creating stalker...");
+    LOGE("[Step 5] gum_stalker_new()...");
     instance->_stalker = gum_stalker_new();
     if (!instance->_stalker) {
-        LOGE("[Stalker] ERROR: gum_stalker_new() returned null!");
+        LOGE("[Step 5] ERROR: gum_stalker_new() returned null!");
         return;
     }
-    LOGE("[Stalker] stalker created: %p", instance->_stalker);
+    LOGE("[Step 5] stalker: %p", instance->_stalker);
 
-    LOGE("[Stalker] setting trust threshold...");
+    LOGE("[Step 6] gum_stalker_set_trust_threshold(0)...");
     gum_stalker_set_trust_threshold(instance->_stalker, 0);
-    LOGE("[Stalker] trust threshold set");
-    // 注意: gum_stalker_set_ratio() 仅 Frida 17+ 可用，Frida 16 中不存在
+    LOGE("[Step 6] done");
+
     if (instance->options.mode == GUM_OPTIONS_MODE_STABLE) {
         gum_process_enumerate_ranges(GUM_PAGE_RW, on_range_found, nullptr);
 
@@ -206,19 +219,19 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
         module_map["size"] = gum_module_range->size;
     }
 
-    LOGE("[Init] enumerating modules...");
+    LOGE("[Step 7] enumerating modules...");
     gum_process_enumerate_modules(module_enumerate, nullptr);
-    LOGE("[Init] module enumeration done, %zu modules tracked", instance->modules.size());
+    LOGE("[Step 7] done, %zu modules tracked", instance->modules.size());
 
     // ============================================================
     // Hook mmap/mprotect 检测 JIT 代码区域
     // ============================================================
 
-    LOGE("[Init] setting up mmap/mprotect/dlopen hooks...");
+    LOGE("[Step 8] setting up mmap/mprotect/dlopen hooks...");
 
     // mmap hook: 检测带 PROT_EXEC 的内存分配
     auto mmap_addr = gum_module_find_export_by_name(NULL, "mmap");
-    LOGE("[Init] mmap addr: 0x%lx", (uintptr_t)mmap_addr);
+    LOGE("[Step 8] mmap addr: 0x%lx", (uintptr_t)mmap_addr);
     if (mmap_addr != 0) {
         // 保存原始函数指针
         static auto original_mmap = (gpointer(*)(uintptr_t, size_t, int, int, int, off_t))mmap_addr;
@@ -329,10 +342,12 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     instance->trace_thread_id = thread_id;
     instance->trace_file = std::ofstream(instance->trace_file_path, std::ios::out | std::ios::trunc);
 
+    LOGE("[Step 9] loading syscall names...");
     for (const auto& svc_name : svc_names) {
         auto svc_name_vector = Utils::str_split(svc_name, ' ');
         instance->svc_func_maps[std::stoi(svc_name_vector.at(1))] = svc_name_vector.at(0);
     }
+    LOGE("[Step 9] done, %zu syscall names loaded", instance->svc_func_maps.size());
 
 #if PLATFORM_ANDROID
     auto libart_module = gum_process_find_module_by_name("libart.so");
