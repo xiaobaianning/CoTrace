@@ -1,0 +1,158 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+    tags-ignore:
+      - '**'
+    paths-ignore:
+      - 'LICENSE'
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cotrace-latest-release
+  cancel-in-progress: false
+
+jobs:
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+
+      - name: Build Android library
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          rm -rf build_android
+          ./build_android.sh
+
+      - name: Package Android library
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          install -m 0644 build_android/libGumTrace.so dist/CoTrace-android-arm64-v8a.so
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cotrace-android-arm64-v8a
+          path: dist/CoTrace-android-arm64-v8a.so
+          if-no-files-found: error
+
+  build-ios:
+    name: Build iOS
+    runs-on: macOS-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure iOS build
+        run: |
+          set -euo pipefail
+          rm -rf build_ios
+          cmake -S . -B build_ios -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+
+      - name: Build iOS library
+        run: |
+          set -euo pipefail
+          cmake --build build_ios --config Release
+
+      - name: Package iOS library
+        run: |
+          set -euo pipefail
+          IOS_LIB="$(find build_ios -name 'libGumTrace.dylib' -print -quit)"
+          test -n "$IOS_LIB"
+          mkdir -p dist
+          install -m 0644 "$IOS_LIB" dist/CoTrace-ios-arm64.dylib
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cotrace-ios-arm64
+          path: dist/CoTrace-ios-arm64.dylib
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish Latest Release
+    runs-on: ubuntu-24.04
+    needs:
+      - build-android
+      - build-ios
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download Android artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: cotrace-android-arm64-v8a
+          path: dist
+
+      - name: Download iOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: cotrace-ios-arm64
+          path: dist
+
+      - name: Publish assets to latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f latest "${GITHUB_SHA}"
+          git push origin refs/tags/latest --force
+
+          cat > release-notes.md <<'EOF'
+          Automated binary build for CoTrace.
+
+          Features:
+          - JIT code tracing (auto-detect mmap/mprotect PROT_EXEC)
+          - PAC pointer stripping
+          - Thread-safe atomic operations
+          - RCU lock-free region lookup
+
+          Assets:
+          - CoTrace-android-arm64-v8a.so
+          - CoTrace-ios-arm64.dylib
+          EOF
+
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest \
+              --title "Latest Build" \
+              --notes-file release-notes.md \
+              --latest
+          else
+            gh release create latest \
+              --verify-tag \
+              --title "Latest Build" \
+              --notes-file release-notes.md \
+              --latest
+          fi
+
+          gh release upload latest \
+            dist/CoTrace-android-arm64-v8a.so \
+            dist/CoTrace-ios-arm64.dylib \
+            --clobber
