@@ -38,7 +38,7 @@ function getSandboxPath(filename) {
 }
 
 function findDylib() {
-    let dlopen = new NativeFunction(Module.findGlobalExportByName('dlopen'), 'pointer', ['pointer', 'int'])
+    let dlopen = new NativeFunction(Module.findExportByName(null, 'dlopen'), 'pointer', ['pointer', 'int'])
 
     for (let path of dylibSearchPaths) {
         let fullPath = path + traceSoName
@@ -62,7 +62,7 @@ function loadGumTrace() {
         return false
     }
 
-    let dlsym = new NativeFunction(Module.findGlobalExportByName('dlsym'), 'pointer', ['pointer', 'pointer'])
+    let dlsym = new NativeFunction(Module.findExportByName(null, 'dlsym'), 'pointer', ['pointer', 'pointer'])
     let initAddr = dlsym(soHandle, Memory.allocUtf8String('init'))
     let runAddr = dlsym(soHandle, Memory.allocUtf8String('run'))
     let unrunAddr = dlsym(soHandle, Memory.allocUtf8String('unrun'))
