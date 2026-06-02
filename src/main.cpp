@@ -40,7 +40,6 @@
 
 #include "GumTrace.h"
 #include "Utils.h"
-#include "compat.h"
 #include <sys/mman.h>  // PROT_EXEC, MAP_FAILED
 
 gboolean module_symbols_cb(const GumSymbolDetails * details, gpointer user_data) {
@@ -61,15 +60,23 @@ gboolean module_symbols_cb(const GumSymbolDetails * details, gpointer user_data)
 }
 
 gboolean module_dependency_cb (const GumDependencyDetails * details, gpointer user_data) {
-#if FRIDA_VERSION >= 17
+    // Frida 16 适配: gum_process_find_module_by_name() 不存在
+    // 需要使用 gum_process_enumerate_modules() 遍历查找
+    // 当前代码使用 Frida 17 API，切换到 Frida 16 时需改为:
+    //
+    // struct FindCtx { const char *name; GumModule *result; };
+    // FindCtx ctx = {details->name, nullptr};
+    // gum_process_enumerate_modules(+[](const GumModuleDetails *d, gpointer ud) -> gboolean {
+    //     auto *fc = (FindCtx*)ud;
+    //     if (strcmp(d->name, fc->name) == 0) { fc->found_range = d->range; return FALSE; }
+    //     return TRUE;
+    // }, &ctx);
+    // 然后用 gum_module_enumerate_symbols(details->name, ...) 代替
+
     auto gum_module = gum_process_find_module_by_name(details->name);
     if (gum_module != nullptr) {
         gum_module_enumerate_symbols(gum_module, module_symbols_cb, nullptr);
     }
-#else
-    // Frida 16: 直接用模块名枚举符号
-    gum_module_enumerate_symbols(details->name, module_symbols_cb, nullptr);
-#endif
     return true;
 }
 
@@ -91,7 +98,6 @@ gboolean on_range_found(const GumRangeDetails *details, gpointer user_data) {
     return TRUE;
 }
 
-#if FRIDA_VERSION >= 17
 gboolean module_enumerate (GumModule * module, gpointer user_data) {
     auto instance = GumTrace::get_instance();
     const char *module_name = gum_module_get_name(module);
@@ -130,47 +136,6 @@ gboolean module_enumerate (GumModule * module, gpointer user_data) {
 
 #endif
 }
-#else
-// Frida 16 版本
-gboolean module_enumerate (const GumModuleDetails * details, gpointer user_data) {
-    auto instance = GumTrace::get_instance();
-    const char *module_name = details->name;
-
-    if (instance->modules.count(module_name) > 0) {
-        return true;
-    }
-
-#if PLATFORM_ANDROID
-    auto module_path = details->path;
-    auto gum_module_range = details->range;
-
-    LOGE("module_enumerate %s %s %lx %lx", module_name, module_path, gum_module_range->base_address, gum_module_range->size);
-
-    if (strncmp(module_path, "/system/", 8) == 0 || strncmp(module_path, "/system_ext/", 12) == 0  ||
-        strncmp(module_path, "/apex/", 6) == 0 || strncmp(module_path, "/vendor/", 8) == 0 ||
-        strstr(module_path, "libGumTrace.so") != nullptr || strstr(module_path, ".odex") != nullptr ||
-        strstr(module_path, "memfd") != nullptr) {
-        gum_stalker_exclude(instance->_stalker, gum_module_range);
-    } else {
-        if (instance->modules.count(module_name) == 0) {
-            auto &module_map = instance->modules[module_name];
-            module_map ["base"] = gum_module_range->base_address;
-            module_map ["size"] = gum_module_range->size;
-        }
-    }
-
-    return true;
-
-#else
-
-    if (instance->modules.count(module_name) == 0) {
-        gum_stalker_exclude(instance->_stalker, details->range);
-    }
-    return true;
-
-#endif
-}
-#endif
 
 extern "C" __attribute__((visibility("default")))
 void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OPTIONS* options) {
@@ -213,7 +178,6 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
 
     auto module_names_vector = Utils::str_split(module_names, ',');
     for (const auto &module_name: module_names_vector) {
-#if FRIDA_VERSION >= 17
         auto *gum_module = gum_process_find_module_by_name(module_name.c_str());
         if (gum_module == nullptr) {
             LOGE("module not found: %s", module_name.c_str());
@@ -225,31 +189,6 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
         auto *gum_module_range = gum_module_get_range(gum_module);
         module_map["base"] = gum_module_range->base_address;
         module_map["size"] = gum_module_range->size;
-#else
-        // Frida 16: 使用字符串模块名
-        gum_module_enumerate_symbols(module_name.c_str(), module_symbols_cb, nullptr);
-        gum_module_enumerate_dependencies(module_name.c_str(), module_dependency_cb, nullptr);
-        // 通过 enumerate 查找模块范围
-        struct ModFindCtx { const char *name; GumMemoryRange range; bool found; };
-        ModFindCtx mctx = {module_name.c_str(), {0, 0}, false};
-        gum_process_enumerate_modules(
-            +[](const GumModuleDetails *d, gpointer ud) -> gboolean {
-                auto *fc = (ModFindCtx*)ud;
-                if (d->name && strcmp(d->name, fc->name) == 0) {
-                    fc->range = *d->range;
-                    fc->found = true;
-                    return FALSE;
-                }
-                return TRUE;
-            }, &mctx);
-        if (mctx.found) {
-            auto &module_map = instance->modules[module_name];
-            module_map["base"] = mctx.range.base_address;
-            module_map["size"] = mctx.range.size;
-        } else {
-            LOGE("module not found: %s", module_name.c_str());
-        }
-#endif
     }
 
     gum_process_enumerate_modules(module_enumerate, nullptr);
@@ -331,12 +270,11 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
                     FindCtx ctx = {mod_name, {0, 0}, false};
 
                     gum_process_enumerate_modules(
-                        +[](GUM_MODULE_ENUM_PARAM
-                            gpointer user_data) -> gboolean {
+                        +[](GumModule *module, gpointer user_data) -> gboolean {
                             auto *fc = (FindCtx*)user_data;
-                            const char *name = GUM_MODULE_GET_NAME(GUM_MODULE_ARG);
+                            const char *name = gum_module_get_name(module);
                             if (name && strcmp(name, fc->target) == 0) {
-                                auto *range = GUM_MODULE_GET_RANGE(GUM_MODULE_ARG);
+                                auto *range = gum_module_get_range(module);
                                 if (range) {
                                     fc->range = *range;
                                     fc->found = true;
@@ -377,7 +315,6 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     }
 
 #if PLATFORM_ANDROID
-#if FRIDA_VERSION >= 17
     auto libart_module = gum_process_find_module_by_name("libart.so");
     GumAddress JNI_GetCreatedJavaVMs_addr = gum_module_find_symbol_by_name(libart_module, "JNI_GetCreatedJavaVMs");
     if (JNI_GetCreatedJavaVMs_addr == 0) {
@@ -386,13 +323,6 @@ void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OP
     if (JNI_GetCreatedJavaVMs_addr == 0) {
         JNI_GetCreatedJavaVMs_addr = gum_module_find_global_export_by_name("JNI_GetCreatedJavaVMs");
     }
-#else
-    // Frida 16: 使用字符串模块名
-    GumAddress JNI_GetCreatedJavaVMs_addr = gum_module_find_symbol_by_name("libart.so", "JNI_GetCreatedJavaVMs");
-    if (JNI_GetCreatedJavaVMs_addr == 0) {
-        JNI_GetCreatedJavaVMs_addr = gum_module_find_export_by_name("libart.so", "JNI_GetCreatedJavaVMs");
-    }
-#endif
     if (JNI_GetCreatedJavaVMs_addr == 0) {
         LOGE("未找到JNI_GetCreatedJavaVMs符号");
     } else {
