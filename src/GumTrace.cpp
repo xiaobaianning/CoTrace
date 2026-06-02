@@ -477,6 +477,13 @@ void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput
     while (gum_stalker_iterator_next(it, (const cs_insn **) &p_insn)) {
         uintptr_t addr = (uintptr_t)p_insn->address;
 
+        // 首次 transform 时打印日志
+        static int transform_count = 0;
+        if (transform_count < 5) {
+            transform_count++;
+            LOGE("[Transform] #%d addr=0x%lx insn=%s", transform_count, addr, p_insn->mnemonic);
+        }
+
         // 优先检查已知模块 (快速路径: 缓存 + O(log n) 二分)
         const std::string *module_name_ptr = self->in_range_module(addr);
 

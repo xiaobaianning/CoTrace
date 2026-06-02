@@ -251,8 +251,12 @@ function main() {
         console.log('[CoTrace] add_jit_region not available:', e.message)
     }
 
-    // 启动追踪
-    startTrace()
+    // 启动追踪 - 追踪 App 主线程
+    let threads = Process.enumerateThreads()
+    console.log('[CoTrace] available threads:', threads.map(t => t.id).join(', '))
+    let mainThreadId = threads[0].id
+    console.log('[CoTrace] using thread:', mainThreadId)
+    startTrace(targetSo, mainThreadId, 0)
 
     // --- 示例 2: hook 目标函数，在其执行期间追踪 ---
     // let targetModule = Process.findModuleByName(targetSo)
