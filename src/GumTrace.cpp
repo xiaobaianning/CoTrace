@@ -5,6 +5,7 @@
 #include "GumTrace.h"
 #include "Utils.h"
 #include "FuncPrinter.h"
+#include <unordered_set>
 
 // ============================================================
 // CodeRegionManager 实现 (RCU 无锁读取)
@@ -64,6 +65,8 @@ void CodeRegionManager::add_region(uintptr_t start, uintptr_t end, RegionType ty
             it->name = name;
             regions_.store(new_regions, std::memory_order_release);
             delete old_regions;
+            LOGE("[RegionManager] updated region: %s [0x%lx - 0x%lx] type=%d",
+                 name.c_str(), start, end, (int)type);
             return;
         }
     }
@@ -76,6 +79,9 @@ void CodeRegionManager::add_region(uintptr_t start, uintptr_t end, RegionType ty
     // 原子交换
     regions_.store(new_regions, std::memory_order_release);
     delete old_regions;
+
+    LOGE("[RegionManager] added region: %s [0x%lx - 0x%lx] type=%d total=%zu",
+         name.c_str(), start, end, (int)type, new_regions->size());
 }
 
 void CodeRegionManager::remove_region(uintptr_t start) {
@@ -156,6 +162,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
     int &buff_n = self->buffer_offset;
 
     if (buff_n > BUFFER_SIZE - 1024) {
+        LOGE("[Buffer] flushing %d bytes to disk", buff_n);
         self->trace_file.write(buff, buff_n);
         buff_n = 0;
     }
@@ -373,18 +380,43 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
                    callback_ctx->instruction_detail.arm64.operands[0].type == ARM64_OP_REG) {
             Utils::get_register_value(callback_ctx->instruction_detail.arm64.operands[0].reg, cpu_context, jump_addr);
             // PAC 剥离: 间接调用目标可能带有 PAC 签名
-            jump_addr = (__uint128_t)gum_strip_code_pointer((gpointer)(uintptr_t)jump_addr);
+            {
+                uintptr_t raw = (uintptr_t)jump_addr;
+                jump_addr = (__uint128_t)gum_strip_code_pointer((gpointer)raw);
+                if (raw != (uintptr_t)jump_addr) {
+                    LOGE("[PAC] BLR stripped: 0x%lx -> 0x%lx at pc=0x%lx",
+                         raw, (uintptr_t)jump_addr, (uintptr_t)cpu_context->pc);
+                }
+            }
         } else if (callback_ctx->instruction.id == ARM64_INS_BR &&
                    callback_ctx->instruction_detail.arm64.operands[0].type == ARM64_OP_REG) {
             Utils::get_register_value(callback_ctx->instruction_detail.arm64.operands[0].reg, cpu_context, jump_addr);
             // PAC 剥离: 间接跳转目标可能带有 PAC 签名
-            jump_addr = (__uint128_t)gum_strip_code_pointer((gpointer)(uintptr_t)jump_addr);
+            {
+                uintptr_t raw = (uintptr_t)jump_addr;
+                jump_addr = (__uint128_t)gum_strip_code_pointer((gpointer)raw);
+                if (raw != (uintptr_t)jump_addr) {
+                    LOGE("[PAC] BR stripped: 0x%lx -> 0x%lx at pc=0x%lx",
+                         raw, (uintptr_t)jump_addr, (uintptr_t)cpu_context->pc);
+                }
+            }
         } else if (callback_ctx->instruction.id == ARM64_INS_B &&
                    callback_ctx->instruction_detail.arm64.operands[0].type == ARM64_OP_IMM) {
             jump_addr = callback_ctx->instruction_detail.arm64.operands[0].imm;
         }
 
         if (jump_addr > 0) {
+            // 日志: 记录所有跳转目标（首次出现时）
+            static std::unordered_set<uintptr_t> logged_jumps;
+            uintptr_t jump_raw = (uintptr_t)jump_addr;
+            if (logged_jumps.find(jump_raw) == logged_jumps.end()) {
+                logged_jumps.insert(jump_raw);
+                bool known = self->func_maps.count(jump_addr) > 0;
+                LOGE("[CALL] 0x%lx -> 0x%lx insn=%s known_func=%d",
+                     (uintptr_t)cpu_context->pc, jump_raw,
+                     callback_ctx->instruction.mnemonic, known ? 1 : 0);
+            }
+
             if (self->func_maps.count(jump_addr) > 0) {
                 self->last_func_context.info_n = 0;
                 self->last_func_context.address = jump_addr;
@@ -461,6 +493,13 @@ void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput
                 auto callback_ctx = self->callback_context_instance->pull(
                     p_insn, region->name.c_str(), region->start);
                 gum_stalker_iterator_put_callout(it, callout_callback, callback_ctx, nullptr);
+                // 首次命中 JIT 区域时打印日志（限制频率避免刷屏）
+                static uintptr_t last_jit_log = 0;
+                if (addr != last_jit_log) {
+                    last_jit_log = addr;
+                    LOGE("[JIT] instrumenting: %s 0x%lx insn=%s",
+                         region->name.c_str(), addr, p_insn->mnemonic);
+                }
             }
         } else {
             // 命中已知模块
@@ -532,13 +571,29 @@ const std::map<std::string, std::size_t>& GumTrace::get_module_by_name(const std
 }
 
 void GumTrace::follow() {
+    LOGE("[Stalker] follow() called, thread_id=%d", trace_thread_id);
+    LOGE("[Stalker] tracking %zu modules:", modules.size());
+    for (const auto &pair : modules) {
+        const auto &m = pair.second;
+        LOGE("[Stalker]   %s [0x%lx - 0x%lx]", pair.first.c_str(), m.at("base"), m.at("base") + m.at("size"));
+    }
+    auto regions = region_manager->get_regions();
+    LOGE("[Stalker] tracking %zu JIT regions:", regions.size());
+    for (const auto &r : regions) {
+        LOGE("[Stalker]   %s [0x%lx - 0x%lx]", r.name.c_str(), r.start, r.end);
+    }
+
     trace_thread_id > 0
         ? gum_stalker_follow(_stalker, trace_thread_id, _transformer, nullptr)
         : gum_stalker_follow_me(_stalker, _transformer, nullptr);
+
+    LOGE("[Stalker] follow() done, stalker=%p", _stalker);
 }
 
 
 void GumTrace::unfollow() {
+    LOGE("[Stalker] unfollow() called, flushing buffer (%d bytes)", buffer_offset);
+
     trace_thread_id > 0 ? gum_stalker_unfollow(_stalker, trace_thread_id) : gum_stalker_unfollow_me(_stalker);
 
     if (trace_file.is_open()) {
@@ -546,5 +601,8 @@ void GumTrace::unfollow() {
         buffer_offset = 0;
         trace_file.flush();
         trace_file.close();
+        LOGE("[Stalker] unfollow() done, trace file closed");
+    } else {
+        LOGE("[Stalker] WARNING: trace_file not open during unfollow");
     }
 }

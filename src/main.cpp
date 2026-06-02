@@ -140,6 +140,12 @@ gboolean module_enumerate (GumModule * module, gpointer user_data) {
 extern "C" __attribute__((visibility("default")))
 void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OPTIONS* options) {
 
+    LOGE("=== CoTrace init() called ===");
+    LOGE("  module_names: %s", module_names ? module_names : "(null)");
+    LOGE("  trace_file_path: %s", trace_file_path ? trace_file_path : "(null)");
+    LOGE("  thread_id: %d", thread_id);
+    LOGE("  options mode: %llu", options ? options->mode : 0);
+
     gum_init();
     auto code_signing_policy = gum_process_get_code_signing_policy();
     LOGE("Gum code signing policy before init: %s",
@@ -388,18 +394,24 @@ void* thread_function(void* arg) {
 
 extern "C" __attribute__((visibility("default")))
 void run() {
+    LOGE("=== CoTrace run() called ===");
 
     pthread_t thread1;
     pthread_create(&thread1, NULL, thread_function, nullptr);
+    LOGE("Background flush thread created");
 
     GumTrace *instance = GumTrace::get_instance();
     instance->follow();
+
+    LOGE("=== CoTrace run() done ===");
 }
 
 extern "C" __attribute__((visibility("default")))
 void unrun() {
+    LOGE("=== CoTrace unrun() called ===");
     GumTrace *instance = GumTrace::get_instance();
     instance->unfollow();
+    LOGE("=== CoTrace unrun() done ===");
 }
 
 int main() {
