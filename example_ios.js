@@ -112,12 +112,23 @@ function loadGumTrace() {
     return true
 }
 
+let _traceStarted = false
+
 function startTrace(moduleName, threadId, mode) {
+    if (_traceStarted) {
+        console.log('[CoTrace] already started, skipping')
+        return
+    }
+    _traceStarted = true
+
     moduleName = moduleName || targetSo
     threadId = threadId || 0
     mode = mode || 0
 
-    if (!loadGumTrace()) return
+    if (!loadGumTrace()) {
+        _traceStarted = false
+        return
+    }
 
     let moduleNames = Memory.allocUtf8String(moduleName)
     let outputPath = Memory.allocUtf8String(getSandboxPath('trace.log'))
@@ -140,6 +151,7 @@ function stopTrace() {
     if (gumtrace_unrun) {
         console.log('[CoTrace] stopping trace...')
         gumtrace_unrun()
+        _traceStarted = false
         console.log('[CoTrace] trace stopped')
     }
 }
