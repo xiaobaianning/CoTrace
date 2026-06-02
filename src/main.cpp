@@ -378,9 +378,6 @@ extern "C" __attribute__((visibility("default")))
 void run() {
     LOGE("=== CoTrace run() called ===");
 
-    // JIT hooks 暂时禁用（interceptor 在此设备上崩溃）
-    // setup_jit_hooks();
-
     pthread_t thread1;
     pthread_create(&thread1, NULL, thread_function, nullptr);
     LOGE("Background flush thread created");
@@ -397,6 +394,18 @@ void unrun() {
     GumTrace *instance = GumTrace::get_instance();
     instance->unfollow();
     LOGE("=== CoTrace unrun() done ===");
+}
+
+// 供 Frida JS 调用，添加 JIT 区域
+extern "C" __attribute__((visibility("default")))
+void add_jit_region(void *start, void *end) {
+    auto *rm = CodeRegionManager::get_instance();
+    uintptr_t s = (uintptr_t)start;
+    uintptr_t e = (uintptr_t)end;
+    char name[64];
+    snprintf(name, sizeof(name), "jit_0x%lx", s);
+    rm->add_region(s, e, RegionType::JIT, name);
+    LOGE("[JIT] region added from JS: %s [0x%lx - 0x%lx]", name, s, e);
 }
 
 int main() {

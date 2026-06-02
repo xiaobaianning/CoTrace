@@ -165,11 +165,93 @@ function stopTrace() {
 // 使用示例
 // ============================================================
 
+// ============================================================
+// JIT Hook: 用 Frida JS hook mmap/mprotect，通知 C++ 层
+// ============================================================
+function setupJitHooks() {
+    // hook mmap: 检测 PROT_EXEC 分配
+    let mmapAddr = Module.findExportByName(null, 'mmap')
+    if (mmapAddr) {
+        console.log('[CoTrace] hooking mmap at:', mmapAddr)
+        Interceptor.attach(mmapAddr, {
+            onEnter(args) {
+                this.addr = args[0]
+                this.len = args[1].toInt32()
+                this.prot = args[2].toInt32()
+            },
+            onLeave(retval) {
+                if (retval.isNull()) return
+                if (this.prot & 0x4) {  // PROT_EXEC
+                    let start = retval.toInt32()
+                    let end = start + this.len
+                    console.log('[JIT] mmap detected: 0x' + start.toString(16) + ' - 0x' + end.toString(16) + ' (' + this.len + ' bytes)')
+                    // 通知 C++ 层添加区域
+                    if (gumtrace_add_region) {
+                        gumtrace_add_region(ptr(start), ptr(end))
+                    }
+                }
+            }
+        })
+    }
+
+    // hook mprotect: 检测 +PROT_EXEC
+    let mprotectAddr = Module.findExportByName(null, 'mprotect')
+    if (mprotectAddr) {
+        console.log('[CoTrace] hooking mprotect at:', mprotectAddr)
+        Interceptor.attach(mprotectAddr, {
+            onEnter(args) {
+                this.addr = args[0]
+                this.len = args[1].toInt32()
+                this.prot = args[2].toInt32()
+            },
+            onLeave(retval) {
+                if (retval.toInt32() !== 0) return
+                if (this.prot & 0x4) {  // PROT_EXEC
+                    let start = this.addr.toInt32()
+                    let end = start + this.len
+                    console.log('[JIT] mprotect detected: 0x' + start.toString(16) + ' - 0x' + end.toString(16))
+                    if (gumtrace_add_region) {
+                        gumtrace_add_region(ptr(start), ptr(end))
+                    }
+                }
+            }
+        })
+    }
+}
+
+// C++ 导出的 add_region 函数（可选）
+let gumtrace_add_region = null
+
 function main() {
     console.log('[CoTrace] iOS example loaded')
     console.log('[CoTrace] target module:', targetSo)
 
-    // --- 示例 1: 直接启动追踪（最简单） ---
+    // 先设置 JIT hooks
+    setupJitHooks()
+
+    // 尝试加载 C++ 的 add_region 导出
+    try {
+        let soHandle = findDylib()
+        if (soHandle) {
+            let dlsymAddr = Module.findExportByName(null, 'dlsym')
+            if (!dlsymAddr) {
+                let libdyld = Process.findModuleByName('libdyld.dylib')
+                if (libdyld) dlsymAddr = Module.findExportByName('libdyld.dylib', 'dlsym')
+            }
+            if (dlsymAddr) {
+                let dlsym = new NativeFunction(dlsymAddr, 'pointer', ['pointer', 'pointer'])
+                let addRegionAddr = dlsym(soHandle, Memory.allocUtf8String('add_jit_region'))
+                if (addRegionAddr && !addRegionAddr.isNull()) {
+                    gumtrace_add_region = new NativeFunction(addRegionAddr, 'void', ['pointer', 'pointer'])
+                    console.log('[CoTrace] add_jit_region exported')
+                }
+            }
+        }
+    } catch(e) {
+        console.log('[CoTrace] add_jit_region not available:', e.message)
+    }
+
+    // 启动追踪
     startTrace()
 
     // --- 示例 2: hook 目标函数，在其执行期间追踪 ---
