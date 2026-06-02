@@ -218,18 +218,21 @@ scp root@<device_ip>:/var/mobile/Containers/Data/Application/<UUID>/Documents/tr
 ## 项目结构
 
 ```
-GumTrace/
+CoTrace/
 ├── CMakeLists.txt              # 主构建脚本
 ├── build_android.sh            # Android 构建脚本
 ├── build_ios.sh                # iOS 构建脚本
-├── example.js                  # Frida 使用示例脚本
+├── example.js                  # Android Frida 使用示例
+├── example_ios.js              # iOS Frida 使用示例（含 JIT 追踪说明）
+├── docs/
+│   └── architecture.md         # 架构设计文档
 ├── libs/                       # Frida Gum 静态库和头文件
-│   ├── FridaGum-Android-17.8.3.h
-│   └── FridaGum-IOS-17.8.3.h
+│   ├── FridaGum-Android-17.8.3.h / .a
+│   └── FridaGum-IOS-17.8.3.h / .a
 └── src/
-    ├── main.cpp                # 入口，导出 init/run/unrun 接口
-    ├── GumTrace.h/cpp          # 核心追踪引擎（Stalker 回调、指令解析、日志写入）
-    ├── CallbackContext.h/cpp   # 指令上下文对象池
+    ├── main.cpp                # 入口，导出 init/run/unrun 接口 + mmap/mprotect/dlopen hook
+    ├── GumTrace.h/cpp          # 核心追踪引擎（Stalker 回调、CodeRegionManager、JIT 追踪）
+    ├── CallbackContext.h/cpp   # 指令上下文对象池（原子操作，线程安全）
     ├── FuncPrinter.h/cpp       # 函数调用参数/返回值打印（含 JNI 和 ObjC）
     ├── Utils.h/cpp             # 工具函数（寄存器值读取、hexdump、字符串格式化）
     ├── platform.h              # 平台检测宏
@@ -239,6 +242,71 @@ GumTrace/
         ├── TraceParser.h/cpp   # 日志解析器（零分配设计）
         ├── TaintEngine.h/cpp   # 污点传播引擎（正向/反向）
         └── TaintTracker.1sc    # 010 Editor 污点分析脚本
+```
+
+## 调试日志
+
+CoTrace 内置了详细的调试日志，用于排查问题。通过 `logcat`（Android）或控制台（iOS）查看：
+
+```bash
+# Android
+adb logcat -s FANGG3
+
+# iOS (通过 Frida)
+frida -U -f com.target.app -l example_ios.js 2>&1 | grep -E "\[CoTrace\]|\[JIT\]|\[CALL\]|\[PAC\]|\[Stalker\]|\[Buffer\]|\[RegionManager\]"
+```
+
+### 日志标签说明
+
+| 标签 | 说明 |
+|------|------|
+| `[CoTrace init()]` | 初始化参数：模块名、输出路径、线程 ID、模式 |
+| `[CoTrace run()/unrun()]` | 生命周期：追踪启动/停止 |
+| `RWX support` | RWX 内存支持检查结果 |
+| `[RegionManager]` | JIT 区域添加/更新事件 |
+| `[JIT]` | 首次命中 JIT 区域时打印指令地址 |
+| `[CALL]` | 函数调用目标地址（首次出现时） |
+| `[PAC]` | PAC 指针剥离事件（BLR/BR 目标） |
+| `[Buffer]` | 缓冲区刷写到磁盘 |
+| `[Stalker]` | Stalker follow/unfollow 状态、追踪的模块和区域列表 |
+
+### 常见问题排查
+
+**Q: JIT 代码没有被追踪**
+```
+检查日志中是否有:
+  [JIT] mprotect detected: ...  → mmap/mprotect hook 是否工作
+  [JIT] instrumenting: ...      → Stalker 是否在 JIT 区域插入了 callout
+如果没有 [JIT] 日志，说明目标进程没有通过标准 mmap/mprotect 分配可执行内存。
+```
+
+**Q: 函数调用没有被拦截**
+```
+检查日志中是否有:
+  [CALL] 0x... -> 0x... known_func=0  → 跳转目标不在符号表中
+  [PAC] BLR stripped: 0x... -> 0x...  → PAC 签名被剥离
+如果 known_func=0，说明目标函数没有符号信息（strip 后的二进制）。
+```
+
+**Q: 缓冲区溢出**
+```
+检查日志中是否有:
+  [Buffer] flushing ... bytes to disk  → 正常刷写
+如果频繁出现，说明 trace 数据量过大，考虑缩小追踪范围。
+```
+
+## CI/CD
+
+项目使用 GitHub Actions 自动构建 iOS 版本。每次 push 到 `main` 分支会自动触发构建。
+
+- 构建产物：`CoTrace-ios-arm64.dylib`
+- 下载地址：[Releases](https://github.com/xiaobaianning/CoTrace/releases/tag/latest)
+
+```yaml
+# .github/workflows/ci.yml
+# 触发条件: push to main (忽略 .md 文件)
+# 构建环境: macOS-15 + Xcode
+# 目标: arm64, iOS 12.0+
 ```
 
 ## 内置函数识别
